@@ -2,6 +2,7 @@
 
 use clap::Parser;
 use warp::Filter;
+use bytes::Bytes;
 
 mod config;
 
@@ -20,13 +21,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(8080);
+
+    let main_page = warp::get().map(|| "Hello, world!");
     
-    let github = warp::get()
+    let github = warp::post()
         .and(warp::path("github"))
-        .map(|| "Hello, world!");
+        .and(warp::body::bytes())
+        .map(|body: Bytes| {
+            let text = String::from_utf8_lossy(&body);
+            println!("Debug: Received GitHub webhook:\n{}", text);
+            "{\"error\":null}"
+        });
 
     println!("Listening on 0.0.0.0:{}", port);
-    warp::serve(github).run(([0, 0, 0, 0], port)).await;
+    warp::serve(main_page.or(github)).run(([0, 0, 0, 0], port)).await;
 
     Ok(())
 }
