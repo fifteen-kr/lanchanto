@@ -3,7 +3,7 @@
 use std::convert::Infallible;
 
 use clap::Parser;
-use warp::{http::HeaderMap, Filter};
+use warp::{http::{HeaderMap, StatusCode}, reply::WithStatus, Filter};
 use bytes::Bytes;
 use once_cell::sync::OnceCell;
 
@@ -51,7 +51,7 @@ async fn handle_github(headers: HeaderMap, body: Bytes) -> Result<impl warp::Rep
         Ok(v) => v,
         Err(e) => {
             eprintln!("Error parsing webhook body: {}", e);
-            return Ok(warp::reply::json(&serde_json::json!({"error": "invalid body"})));
+            return Ok(reply_error(StatusCode::BAD_REQUEST, "invalid body"));
         }
     };
 
@@ -62,14 +62,20 @@ async fn handle_github(headers: HeaderMap, body: Bytes) -> Result<impl warp::Rep
 
     if !verify_signature(&headers, &body) {
         eprintln!("Error: invalid credential!");
-        return Ok(reply_error("invalid credential"));
+        return Ok(reply_error(StatusCode::FORBIDDEN, "invalid credential"));
     }
 
-    Ok(warp::reply::json(&serde_json::json!({"error": null})))
+    Ok(warp::reply::with_status(
+        warp::reply::json(&serde_json::json!({"error": null})),
+        StatusCode::OK,
+    ))
 }
 
-fn reply_error(message: &str) -> warp::reply::Json {
-    warp::reply::json(&serde_json::json!({"error": message}))
+fn reply_error(status_code: StatusCode, message: &str) -> WithStatus<warp::reply::Json> {
+    warp::reply::with_status(
+        warp::reply::json(&serde_json::json!({"error": message})),
+        status_code,
+    )
 }
 
 fn verify_signature(headers: &HeaderMap, body: &[u8]) -> bool {
