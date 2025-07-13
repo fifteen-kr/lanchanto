@@ -1,4 +1,7 @@
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
+use std::fs::{self, File};
+use std::io::{self, Cursor};
+use zip::ZipArchive;
 
 use super::config;
 
@@ -15,7 +18,7 @@ struct ArtifactList {
 }
 
 pub async fn download_artifacts(token: &str, repo_full: &str, download_url: &str, artifacts: &Vec<config::Artifact>) -> Result<(), Box<dyn std::error::Error>> {
-    println!("> Downloading artifacts for {}, url={}", repo_full, download_url);
+    println!("> Fetching artifacts for {}, url={}", repo_full, download_url);
 
     if token.is_empty() {
         return Err("empty github token".into());
@@ -32,11 +35,16 @@ pub async fn download_artifacts(token: &str, repo_full: &str, download_url: &str
        .json()
        .await?;
 
-    // O(n^2) loop, but it's fine for now
+    let artifact_map: HashMap<_, _> = artifact_list
+        .artifacts
+        .iter()
+        .map(|entry| (entry.name.as_str(), entry))
+        .collect();
+
     for wanted in artifacts {
-        if let Some(entry) = artifact_list.artifacts.iter().find(|entry| entry.name == wanted.name) {
+        if let Some(entry) = artifact_map.get(wanted.name.as_str()) {
             println!("> Downloading {} to {}...", entry.name, wanted.target);
-            
+
             let bytes = client
                 .get(&entry.archive_download_url)
                 .bearer_auth(token)
@@ -55,7 +63,29 @@ pub async fn download_artifacts(token: &str, repo_full: &str, download_url: &str
 }
 
 async fn unzip_bytes(data: &[u8], target: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    // TODO
+    fs::create_dir_all(target)?;
+
+    let reader = Cursor::new(data);
+    let mut archive = zip::ZipArchive::new(reader)?;
+
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i)?;
+        let out_path = match file.enclosed_name() {
+            Some(p) => target.join(p),
+            None => continue,
+        };
+
+        if file.is_dir() {
+            fs::create_dir_all(&out_path)?;
+        } else {
+            if let Some(parent) = out_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+
+            let mut out_file = File::create(&out_path)?;
+            io::copy(&mut file, &mut out_file)?;
+        }
+    }
 
     Ok(())
 }
