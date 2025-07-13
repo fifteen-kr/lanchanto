@@ -4,12 +4,13 @@ use std::convert::Infallible;
 
 use once_cell::sync::OnceCell;
 use bytes::Bytes;
-use hmac::Mac;
 
 use clap::Parser;
 use warp::{http::{HeaderMap, StatusCode}, reply::WithStatus, Filter};
 
 mod config;
+mod signature;
+mod download;
 
 #[derive(Parser)]
 struct Args {
@@ -78,7 +79,7 @@ async fn handle_github(headers: HeaderMap, body: Bytes) -> Result<impl warp::Rep
         return Ok(reply_ok());
     }
 
-    if let Err(e) = verify_signature(&config, &headers, &body) {
+    if let Err(e) = signature::verify(&config, &headers, &body) {
         eprintln!("! Error: invalid credential: {}", e);
         return Ok(reply_error(StatusCode::FORBIDDEN, "invalid credential"));
     }
@@ -94,7 +95,7 @@ async fn handle_github(headers: HeaderMap, body: Bytes) -> Result<impl warp::Rep
     let artifacts_url = payload.get("workflow_run").and_then(|v| v.get("artifacts_url")).and_then(|v| v.as_str()).unwrap_or("").to_owned();
     let token = config.credential.githubToken.clone();
     tokio::spawn(async move {
-        if let Err(e) = download_artifacts(&token, &repo_full, &artifacts_url, &deploy_conf.artifact).await {
+        if let Err(e) = download::download_artifacts(&token, &repo_full, &artifacts_url, &deploy_conf.artifact).await {
             eprintln!("! Failed to download artifacts for {}: {}", repo_full, e);
         }
     });
@@ -114,42 +115,4 @@ fn reply_error(status_code: StatusCode, message: &str) -> WithStatus<warp::reply
         warp::reply::json(&serde_json::json!({"error": message})),
         status_code,
     )
-}
-
-fn verify_signature(config: &config::Config, headers: &HeaderMap, body: &[u8]) -> Result<(), &'static str> {
-    let secret = config.credential.githubWebhookSecret.as_bytes();
-    if secret.is_empty() {
-        return Err("empty secret");
-    }
-
-    let sig_header =  headers.get("X-Hub-Signature-256").or_else(|| headers.get("X-Hub-Signature")).and_then(|v| v.to_str().ok());
-    let sig_header = match sig_header {
-        Some(v) => v,
-        None => return Err("missing signature"),
-    };
-
-    let sig = sig_header.strip_prefix("sha256=").unwrap_or("");
-    let sig = match hex::decode(sig) {
-        Ok(v) => v,
-        Err(_) => return Err("invalid signature"),
-    };
-    
-    type HmacSha256 = hmac::Hmac<sha2::Sha256>;
-    let mut mac = match HmacSha256::new_from_slice(secret) {
-        Ok(v) => v,
-        Err(_) => return Err("failed to initialize hmac"),
-    };
-    
-    mac.update(body);
-    if !mac.verify_slice(&sig).is_ok() {
-        return Err("signature mismatch");
-    }
-
-    Ok(())
-}
-
-async fn download_artifacts(token: &str, repo_full: &str, download_url: &str, artifacts: &Vec<config::Artifact>) -> Result<(), Box<dyn std::error::Error>> {
-    println!("> Downloading artifacts for {}, url={}", repo_full, download_url);
-    let client = reqwest::Client::new();
-    Ok(())
 }
