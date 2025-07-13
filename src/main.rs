@@ -74,8 +74,8 @@ async fn handle_github(headers: HeaderMap, body: Bytes) -> Result<impl warp::Rep
 
     println!("Hook received: {} {} {}", repo_full, event, action);
 
-    if !verify_signature(&config, &headers, &body) {
-        eprintln!("! Error: invalid credential!");
+    if let Err(e) = verify_signature(&config, &headers, &body) {
+        eprintln!("! Error: invalid credential: {}", e);
         return Ok(reply_error(StatusCode::FORBIDDEN, "invalid credential"));
     }
 
@@ -108,32 +108,36 @@ fn reply_error(status_code: StatusCode, message: &str) -> WithStatus<warp::reply
     )
 }
 
-fn verify_signature(config: &config::Config, headers: &HeaderMap, body: &[u8]) -> bool {
+fn verify_signature(config: &config::Config, headers: &HeaderMap, body: &[u8]) -> Result<(), &'static str> {
     let secret = config.credential.githubWebhookSecret.as_bytes();
     if secret.is_empty() {
-        return false;
+        return Err("empty secret");
     }
 
     let sig_header =  headers.get("X-Hub-Signature-256").or_else(|| headers.get("X-Hub-Signature")).and_then(|v| v.to_str().ok());
     let sig_header = match sig_header {
         Some(v) => v,
-        None => return false,
+        None => return Err("missing signature"),
     };
 
     let sig = sig_header.strip_prefix("sha256=").unwrap_or("");
     let sig = match hex::decode(sig) {
         Ok(v) => v,
-        Err(_) => return false,
+        Err(_) => return Err("invalid signature"),
     };
     
     type HmacSha256 = hmac::Hmac<sha2::Sha256>;
     let mut mac = match HmacSha256::new_from_slice(secret) {
         Ok(v) => v,
-        Err(_) => return false,
+        Err(_) => return Err("failed to initialize hmac"),
     };
     
     mac.update(body);
-    mac.verify_slice(&sig).is_ok()
+    if !mac.verify_slice(&sig).is_ok() {
+        return Err("signature mismatch");
+    }
+
+    Ok(())
 }
 
 async fn download_artifacts(token: &str, repo_full: &str, download_url: &str, artifacts: &Vec<config::Artifact>) -> Result<(), Box<dyn std::error::Error>> {
