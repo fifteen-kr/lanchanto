@@ -74,6 +74,10 @@ async fn handle_github(headers: HeaderMap, body: Bytes) -> Result<impl warp::Rep
 
     println!("Hook received: {} {} {}", repo_full, event, action);
 
+    if action != "completed" {
+        return Ok(reply_ok());
+    }
+
     if let Err(e) = verify_signature(&config, &headers, &body) {
         eprintln!("! Error: invalid credential: {}", e);
         return Ok(reply_error(StatusCode::FORBIDDEN, "invalid credential"));
@@ -95,10 +99,14 @@ async fn handle_github(headers: HeaderMap, body: Bytes) -> Result<impl warp::Rep
         }
     });
 
-    Ok(warp::reply::with_status(
+    Ok(reply_ok())
+}
+
+fn reply_ok() -> WithStatus<warp::reply::Json> {
+    warp::reply::with_status(
         warp::reply::json(&serde_json::json!({"error": null})),
         StatusCode::OK,
-    ))
+    )
 }
 
 fn reply_error(status_code: StatusCode, message: &str) -> WithStatus<warp::reply::Json> {
