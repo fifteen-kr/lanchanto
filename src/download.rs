@@ -58,6 +58,7 @@ pub async fn download_artifacts(token: &str, repo_full: &str, download_url: &str
         }
     }
 
+    println!("> Downloaded all artifacts for {} successfully!", repo_full);
     Ok(())
 }
 
