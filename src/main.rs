@@ -2,10 +2,12 @@
 
 use std::convert::Infallible;
 
+use once_cell::sync::OnceCell;
+use bytes::Bytes;
+use hmac::Mac;
+
 use clap::Parser;
 use warp::{http::{HeaderMap, StatusCode}, reply::WithStatus, Filter};
-use bytes::Bytes;
-use once_cell::sync::OnceCell;
 
 mod config;
 
@@ -67,15 +69,31 @@ async fn handle_github(headers: HeaderMap, body: Bytes) -> Result<impl warp::Rep
         }
     };
 
-    let repo_full = payload.get("repository").and_then(|v| v.get("full_name")).and_then(|n| n.as_str()).unwrap_or("");
+    let repo_full = payload.get("repository").and_then(|v| v.get("full_name")).and_then(|n| n.as_str()).unwrap_or("").to_owned();
     let action = payload.get("action").and_then(|v| v.as_str()).unwrap_or("");
 
     println!("Hook received: {} {} {}", repo_full, event, action);
 
     if !verify_signature(&config, &headers, &body) {
-        eprintln!("Error: invalid credential!");
+        eprintln!("! Error: invalid credential!");
         return Ok(reply_error(StatusCode::FORBIDDEN, "invalid credential"));
     }
+
+    let deploy_conf = match config.deploy.iter().find(|d| d.repository == repo_full) {
+        Some(v) => v,
+        None => {
+            eprintln!("! Error: unknown repository {}", repo_full);
+            return Ok(reply_error(StatusCode::BAD_REQUEST, "unknown repository"));
+        },
+    };
+
+    let artifacts_url = payload.get("workflow_run").and_then(|v| v.get("artifacts_url")).and_then(|v| v.as_str()).unwrap_or("").to_owned();
+    let token = config.credential.githubToken.clone();
+    tokio::spawn(async move {
+        if let Err(e) = download_artifacts(&token, &repo_full, &artifacts_url, &deploy_conf.artifact).await {
+            eprintln!("! Failed to download artifacts for {}: {}", repo_full, e);
+        }
+    });
 
     Ok(warp::reply::with_status(
         warp::reply::json(&serde_json::json!({"error": null})),
@@ -91,6 +109,35 @@ fn reply_error(status_code: StatusCode, message: &str) -> WithStatus<warp::reply
 }
 
 fn verify_signature(config: &config::Config, headers: &HeaderMap, body: &[u8]) -> bool {
-    // TODO: implement signature verification
-    return false
+    let secret = config.credential.githubWebhookSecret.as_bytes();
+    if secret.is_empty() {
+        return false;
+    }
+
+    let sig_header =  headers.get("X-Hub-Signature-256").or_else(|| headers.get("X-Hub-Signature")).and_then(|v| v.to_str().ok());
+    let sig_header = match sig_header {
+        Some(v) => v,
+        None => return false,
+    };
+
+    let sig = sig_header.strip_prefix("sha256=").unwrap_or("");
+    let sig = match hex::decode(sig) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    
+    type HmacSha256 = hmac::Hmac<sha2::Sha256>;
+    let mut mac = match HmacSha256::new_from_slice(secret) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    
+    mac.update(body);
+    mac.verify_slice(&sig).is_ok()
+}
+
+async fn download_artifacts(token: &str, repo_full: &str, download_url: &str, artifacts: &Vec<config::Artifact>) -> Result<(), Box<dyn std::error::Error>> {
+    println!("> Downloading artifacts for {}, url={}", repo_full, download_url);
+    let client = reqwest::Client::new();
+    Ok(())
 }
