@@ -26,10 +26,10 @@ pub struct Artifact {
 #[derive(Debug, Deserialize, Default)]
 pub struct Credential {
     #[serde(default)]
-    pub githubWebhookSecret: String,
+    pub github_webhook_secret: String,
     
     #[serde(default)]
-    pub githubToken: String,
+    pub github_token: String,
 }
 
 impl Config {

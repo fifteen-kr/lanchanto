@@ -3,7 +3,7 @@ use warp::http::HeaderMap;
 use hmac::Mac;
 
 pub fn verify(config: &config::Config, headers: &HeaderMap, body: &[u8]) -> Result<(), &'static str> {
-    let secret = config.credential.githubWebhookSecret.as_bytes();
+    let secret = config.credential.github_webhook_secret.as_bytes();
     if secret.is_empty() {
         return Err("empty secret");
     }

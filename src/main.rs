@@ -26,12 +26,12 @@ static CONFIG: OnceCell<config::Config> = OnceCell::new();
 fn init_config(args: &Args) {
     let mut config = config::Config::from_file(&args.config).expect("Failed to load config.");
 
-    if config.credential.githubWebhookSecret.is_empty() {
-        config.credential.githubWebhookSecret = std::env::var("GITHUB_WEBHOOK_SECRET").unwrap_or_default();
+    if config.credential.github_webhook_secret.is_empty() {
+        config.credential.github_webhook_secret = std::env::var("GITHUB_WEBHOOK_SECRET").unwrap_or_default();
     }
 
-    if config.credential.githubToken.is_empty() {
-        config.credential.githubToken = std::env::var("GITHUB_TOKEN").unwrap_or_default();
+    if config.credential.github_token.is_empty() {
+        config.credential.github_token = std::env::var("GITHUB_TOKEN").unwrap_or_default();
     }
 
     CONFIG.set(config).expect("Failed to set config.");
@@ -93,7 +93,7 @@ async fn handle_github(headers: HeaderMap, body: Bytes) -> Result<impl warp::Rep
     };
 
     let artifacts_url = payload.get("workflow_run").and_then(|v| v.get("artifacts_url")).and_then(|v| v.as_str()).unwrap_or("").to_owned();
-    let token = config.credential.githubToken.clone();
+    let token = config.credential.github_token.clone();
     tokio::spawn(async move {
         if let Err(e) = download::download_artifacts(&token, &repo_full, &artifacts_url, &deploy_conf.artifact).await {
             eprintln!("! Failed to download artifacts for {}: {}", repo_full, e);

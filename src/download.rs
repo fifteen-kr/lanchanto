@@ -1,7 +1,6 @@
 use std::{collections::HashMap, path::Path};
 use std::fs::{self, File};
 use std::io::{self, Cursor};
-use zip::ZipArchive;
 
 use super::config;
 
