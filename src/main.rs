@@ -9,25 +9,37 @@ use once_cell::sync::OnceCell;
 
 mod config;
 
-static CONFIG: OnceCell<config::Config> = OnceCell::new();
-
 #[derive(Parser)]
 struct Args {
-    #[arg(long)]
+    #[arg(short, long, default_value("8080"))]
+    port: u16,
+
+    #[arg(short, long)]
     config: String,
+}
+
+static CONFIG: OnceCell<config::Config> = OnceCell::new();
+
+fn init_config(args: &Args) {
+    let mut config = config::Config::from_file(&args.config).expect("Failed to load config.");
+
+    if config.credential.githubWebhookSecret.is_empty() {
+        config.credential.githubWebhookSecret = std::env::var("GITHUB_WEBHOOK_SECRET").unwrap_or_default();
+    }
+
+    if config.credential.githubToken.is_empty() {
+        config.credential.githubToken = std::env::var("GITHUB_TOKEN").unwrap_or_default();
+    }
+
+    CONFIG.set(config).expect("Failed to set config.");
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
+    init_config(&args);
 
-    let config = config::Config::from_file(&args.config)?;
-    CONFIG.set(config).expect("Failed to set config.");
-
-    let port: u16 = std::env::var("PORT")
-        .ok()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(8080);
+    let port: u16 = args.port;
 
     let main_page = warp::get().map(|| "Hello, world!\n");
     
@@ -60,7 +72,7 @@ async fn handle_github(headers: HeaderMap, body: Bytes) -> Result<impl warp::Rep
 
     println!("Hook received: {} {} {}", repo_full, event, action);
 
-    if !verify_signature(&headers, &body) {
+    if !verify_signature(&config, &headers, &body) {
         eprintln!("Error: invalid credential!");
         return Ok(reply_error(StatusCode::FORBIDDEN, "invalid credential"));
     }
@@ -78,7 +90,7 @@ fn reply_error(status_code: StatusCode, message: &str) -> WithStatus<warp::reply
     )
 }
 
-fn verify_signature(headers: &HeaderMap, body: &[u8]) -> bool {
+fn verify_signature(config: &config::Config, headers: &HeaderMap, body: &[u8]) -> bool {
     // TODO: implement signature verification
     return false
 }

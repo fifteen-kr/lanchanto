@@ -4,6 +4,9 @@ use std::{fs, path::Path};
 #[derive(Debug, Deserialize)]
 pub struct Config {
     #[serde(default)]
+    pub credential: Credential,
+
+    #[serde(default)]
     pub deploy: Vec<Deploy>,
 }
 
@@ -18,6 +21,15 @@ pub struct Deploy {
 pub struct Artifact {
     pub name: String,
     pub target: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct Credential {
+    #[serde(default)]
+    pub githubWebhookSecret: String,
+    
+    #[serde(default)]
+    pub githubToken: String,
 }
 
 impl Config {
