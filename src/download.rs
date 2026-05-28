@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::Path};
+use std::{collections::HashMap, path::{Path, PathBuf}};
 use std::fs::{self, File};
 use std::io::{self, Cursor};
 
@@ -16,7 +16,7 @@ struct ArtifactList {
     artifacts: Vec<ArtifactEntry>,
 }
 
-pub async fn download_artifacts(token: &str, repo_full: &str, download_url: &str, artifacts: &Vec<config::Artifact>) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn download_artifacts(token: &str, repo_full: &str, download_url: &str, artifacts: &[config::Artifact]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("> Fetching artifacts for {}, url={}", repo_full, download_url);
 
     if token.is_empty() {
@@ -54,7 +54,8 @@ pub async fn download_artifacts(token: &str, repo_full: &str, download_url: &str
                 .bytes()
                 .await?;
 
-            unzip_bytes(&bytes, Path::new(&wanted.target)).await?;
+            let target_path = PathBuf::from(&wanted.target);
+            tokio::task::spawn_blocking(move || unzip_bytes(&bytes, &target_path)).await??;
         }
     }
 
@@ -62,7 +63,7 @@ pub async fn download_artifacts(token: &str, repo_full: &str, download_url: &str
     Ok(())
 }
 
-async fn unzip_bytes(data: &[u8], target: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn unzip_bytes(data: &[u8], target: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     fs::create_dir_all(target)?;
 
     let reader = Cursor::new(data);

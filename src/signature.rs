@@ -8,7 +8,7 @@ pub fn verify(config: &config::Config, headers: &HeaderMap, body: &[u8]) -> Resu
         return Err("empty secret");
     }
 
-    let sig_header =  headers.get("X-Hub-Signature-256").or_else(|| headers.get("X-Hub-Signature")).and_then(|v| v.to_str().ok());
+    let sig_header = headers.get("X-Hub-Signature-256").and_then(|v| v.to_str().ok());
     let sig_header = match sig_header {
         Some(v) => v,
         None => return Err("missing signature"),
@@ -27,7 +27,7 @@ pub fn verify(config: &config::Config, headers: &HeaderMap, body: &[u8]) -> Resu
     };
     
     mac.update(body);
-    if !mac.verify_slice(&sig).is_ok() {
+    if mac.verify_slice(&sig).is_err() {
         return Err("signature mismatch");
     }
 

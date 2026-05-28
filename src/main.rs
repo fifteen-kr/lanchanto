@@ -1,8 +1,6 @@
-// #![deny(warnings)]
-
 use std::convert::Infallible;
 
-use once_cell::sync::OnceCell;
+use std::sync::OnceLock;
 use bytes::Bytes;
 
 use clap::Parser;
@@ -21,7 +19,7 @@ struct Args {
     config: String,
 }
 
-static CONFIG: OnceCell<config::Config> = OnceCell::new();
+static CONFIG: OnceLock<config::Config> = OnceLock::new();
 
 fn init_config(args: &Args) {
     let mut config = config::Config::from_file(&args.config).expect("Failed to load config.");
@@ -61,6 +59,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn handle_github(headers: HeaderMap, body: Bytes) -> Result<impl warp::Reply, Infallible> {
     let config = CONFIG.get().expect("Failed to get config.");
 
+    if let Err(e) = signature::verify(config, &headers, &body) {
+        eprintln!("! Error: invalid credential: {}", e);
+        return Ok(reply_error(StatusCode::FORBIDDEN, "invalid credential"));
+    }
+
     let event = headers.get("X-GitHub-Event").and_then(|v| v.to_str().ok()).unwrap_or("");
     let payload: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
@@ -77,11 +80,6 @@ async fn handle_github(headers: HeaderMap, body: Bytes) -> Result<impl warp::Rep
 
     if action != "completed" {
         return Ok(reply_ok());
-    }
-
-    if let Err(e) = signature::verify(&config, &headers, &body) {
-        eprintln!("! Error: invalid credential: {}", e);
-        return Ok(reply_error(StatusCode::FORBIDDEN, "invalid credential"));
     }
 
     let deploy_conf = match config.deploy.iter().find(|d| d.repository == repo_full) {
