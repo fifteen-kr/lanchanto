@@ -13,13 +13,29 @@ lanchanto --config="config.toml"
 Configure lanĉanto like this:
 
 ```toml
+[credential]
+# Both may be omitted and provided via the GITHUB_WEBHOOK_SECRET and
+# GITHUB_TOKEN environment variables instead.
+github_webhook_secret = "..."
+github_token = "..."
+
 [[deploy]]
 repository = "fifteen-kr/blog"
+# Only successful `workflow_run` events for this branch deploy.
+# Omitting `branch` deploys ANY branch's successful runs (a warning is logged).
+branch = "main"
+# Optional: only accept runs of this workflow (matches `workflow_run.name`).
+workflow = "Build"
 
 [[deploy.artifact]]
 name = "blog.zip"
 target = "/var/www/blog"
 ```
+
+On deploy, each artifact is extracted into a staging directory and swapped into
+place, so the target directory is **replaced**, never merged into: files that
+vanished from the artifact vanish from the target, and a failed download or
+extraction leaves the previous version untouched.
 
 Here is an example of a systemd service file:
 
