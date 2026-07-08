@@ -79,7 +79,8 @@ pub async fn download_artifacts(token: &str, repo_full: &str, download_url: &str
             .with_context(|| format!("failed to download artifact {}", entry.name))?;
 
         let target_path = PathBuf::from(&wanted.target);
-        tokio::task::spawn_blocking(move || deploy_zip(zip_file, &target_path))
+        let preserve = wanted.preserve.clone();
+        tokio::task::spawn_blocking(move || deploy_zip(zip_file, &target_path, &preserve))
             .await
             .context("deploy task panicked")?
             .with_context(|| format!("failed to deploy artifact {}", entry.name))?;
@@ -112,7 +113,7 @@ async fn fetch_to_temp_file(url: &str, token: &str) -> anyhow::Result<File> {
 /// Extracts into a staging directory next to `target`, then swaps it in. The live
 /// directory is never unzipped over: a failed download or extraction leaves it
 /// untouched, and files removed upstream don't linger from previous deploys.
-fn deploy_zip(zip_file: File, target: &Path) -> anyhow::Result<()> {
+fn deploy_zip(zip_file: File, target: &Path, preserve: &[String]) -> anyhow::Result<()> {
     let parent = target
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -130,7 +131,7 @@ fn deploy_zip(zip_file: File, target: &Path) -> anyhow::Result<()> {
     let old = parent.join(format!(".{name}.old-{millis}"));
 
     unzip_to(zip_file, &staging)
-        .and_then(|()| swap_dirs(&staging, target, &old))
+        .and_then(|()| swap_dirs(&staging, target, &old, preserve))
         .inspect_err(|_| {
             let _ = fs::remove_dir_all(&staging);
         })
@@ -164,11 +165,14 @@ fn unzip_to(zip_file: File, staging: &Path) -> anyhow::Result<()> {
 }
 
 /// Replaces `target` with `staging`: rename the live directory to `old`, rename
-/// `staging` into place, then delete `old`. Not a single atomic step, but the
-/// vulnerable window is two renames instead of the whole extraction — and on the
-/// first failure the previous version is renamed back.
-fn swap_dirs(staging: &Path, target: &Path, old: &Path) -> anyhow::Result<()> {
+/// `staging` into place, carry `preserve` paths over from `old`, then delete `old`.
+/// Not a single atomic step, but the vulnerable window is a few renames instead of
+/// the whole extraction — on swap failure the previous version is renamed back, and
+/// on carry failure `old` is kept on disk so no preserved state is ever lost.
+fn swap_dirs(staging: &Path, target: &Path, old: &Path, preserve: &[String]) -> anyhow::Result<()> {
     if !target.exists() {
+        // First deploy: nothing to carry; artifact-shipped copies of preserved
+        // paths (if any) stay as the initial state.
         fs::rename(staging, target)?;
         return Ok(());
     }
@@ -184,9 +188,40 @@ fn swap_dirs(staging: &Path, target: &Path, old: &Path) -> anyhow::Result<()> {
         });
     }
 
+    carry_preserved(old, target, preserve).with_context(|| {
+        format!(
+            "deployed, but carrying preserved paths failed; previous version kept at {}",
+            old.display()
+        )
+    })?;
+
     if let Err(e) = fs::remove_dir_all(old) {
         // The new version is live; a leftover old tree is cosmetic. Don't fail the deploy.
         eprintln!("! Warning: failed to remove previous version at {}: {}", old.display(), e);
+    }
+    Ok(())
+}
+
+/// Moves each `preserve` path (runtime state the artifact must not clobber) from the
+/// previous version into the freshly deployed target. Live state wins: the copy of a
+/// path shipped in the artifact is discarded first. Same-filesystem renames, so cheap.
+fn carry_preserved(old: &Path, target: &Path, preserve: &[String]) -> anyhow::Result<()> {
+    for rel in preserve {
+        let from = old.join(rel);
+        if !from.exists() {
+            continue;
+        }
+
+        let to = target.join(rel);
+        if to.is_dir() {
+            fs::remove_dir_all(&to).with_context(|| format!("failed to drop shipped copy of {rel}"))?;
+        } else if to.exists() {
+            fs::remove_file(&to).with_context(|| format!("failed to drop shipped copy of {rel}"))?;
+        }
+        if let Some(parent) = to.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::rename(&from, &to).with_context(|| format!("failed to carry preserved path {rel}"))?;
     }
     Ok(())
 }
@@ -243,7 +278,7 @@ mod tests {
             ("sub/inner.txt", Some("nested contents")),
         ]);
 
-        deploy_zip(zip, &target).unwrap();
+        deploy_zip(zip, &target, &[]).unwrap();
 
         assert_eq!(read_file(&target.join("hello.txt")), "hello world");
         assert_eq!(read_file(&target.join("sub").join("inner.txt")), "nested contents");
@@ -260,7 +295,7 @@ mod tests {
         fs::write(target.join("common.txt"), "old contents").unwrap();
 
         let zip = build_zip(&[("common.txt", Some("new contents"))]);
-        deploy_zip(zip, &target).unwrap();
+        deploy_zip(zip, &target, &[]).unwrap();
 
         assert!(
             !target.join("stale.txt").exists(),
@@ -278,7 +313,7 @@ mod tests {
         fs::write(target.join("v1.txt"), "v1").unwrap();
 
         let zip = build_zip(&[("v2.txt", Some("v2"))]);
-        deploy_zip(zip, &target).unwrap();
+        deploy_zip(zip, &target, &[]).unwrap();
 
         // Both the `.app.new-*` staging dir and the `.app.old-*` renamed previous
         // version must be gone; the parent holds only the live target.
@@ -296,7 +331,7 @@ mod tests {
             ("safe.txt", Some("safe contents")),
         ]);
 
-        deploy_zip(zip, &target).unwrap();
+        deploy_zip(zip, &target, &[]).unwrap();
 
         // The invariant is containment: nothing may land outside the staging dir.
         // zip >= 8 `enclosed_name` skips `..`-underflow entries entirely, but
@@ -326,7 +361,7 @@ mod tests {
         garbage.write_all(b"this is not a zip archive").unwrap();
         garbage.rewind().unwrap();
 
-        let result = deploy_zip(garbage, &target);
+        let result = deploy_zip(garbage, &target, &[]);
 
         assert!(result.is_err(), "corrupt archive must fail the deploy");
         assert_eq!(read_file(&target.join("keep.txt")), "precious");
@@ -336,5 +371,101 @@ mod tests {
             ["app"],
             "failed deploy must clean up its staging dir and leave no debris"
         );
+    }
+
+    #[test]
+    fn preserved_file_survives_deploy() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("app");
+        fs::create_dir_all(target.join("var")).unwrap();
+        fs::write(target.join("var").join("db.sqlite"), "precious rows").unwrap();
+        fs::write(target.join("stale.txt"), "not in the new artifact").unwrap();
+
+        let zip = build_zip(&[("index.html", Some("<html>v2</html>"))]);
+        deploy_zip(zip, &target, &["var".to_string()]).unwrap();
+
+        assert_eq!(read_file(&target.join("var").join("db.sqlite")), "precious rows");
+        assert!(
+            !target.join("stale.txt").exists(),
+            "non-preserved file must not survive the swap"
+        );
+        assert_eq!(read_file(&target.join("index.html")), "<html>v2</html>");
+        assert_eq!(dir_entry_names(&target), ["index.html", "var"]);
+        assert_eq!(dir_entry_names(&target.join("var")), ["db.sqlite"]);
+        assert_eq!(dir_entry_names(dir.path()), ["app"], "no .old-*/.new-* debris in the parent");
+    }
+
+    #[test]
+    fn live_state_wins_over_shipped_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("app");
+        fs::create_dir_all(target.join("var")).unwrap();
+        fs::write(target.join("var").join("db.sqlite"), "precious rows").unwrap();
+
+        // The artifact ships its own copy of the preserved dir; the live one must
+        // replace it wholesale, not merge with it.
+        let zip = build_zip(&[("var/seed.txt", Some("factory seed"))]);
+        deploy_zip(zip, &target, &["var".to_string()]).unwrap();
+
+        assert_eq!(
+            dir_entry_names(&target.join("var")),
+            ["db.sqlite"],
+            "shipped var/ must be discarded wholesale, not merged with live state"
+        );
+        assert_eq!(read_file(&target.join("var").join("db.sqlite")), "precious rows");
+    }
+
+    #[test]
+    fn nested_preserve_path_creates_parents() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("app");
+        fs::create_dir_all(target.join("var")).unwrap();
+        fs::write(target.join("var").join("data.db"), "precious rows").unwrap();
+        fs::write(target.join("var").join("cache.tmp"), "rebuildable").unwrap();
+
+        // The zip ships no var/ at all, so carrying var/data.db must create the
+        // parent directory inside the new target.
+        let zip = build_zip(&[("index.html", Some("<html>v2</html>"))]);
+        deploy_zip(zip, &target, &["var/data.db".to_string()]).unwrap();
+
+        assert_eq!(read_file(&target.join("var").join("data.db")), "precious rows");
+        assert!(
+            !target.join("var").join("cache.tmp").exists(),
+            "only the named path is preserved, not its siblings"
+        );
+        assert_eq!(dir_entry_names(&target), ["index.html", "var"]);
+        assert_eq!(dir_entry_names(&target.join("var")), ["data.db"]);
+    }
+
+    #[test]
+    fn missing_preserve_path_is_noop_and_seed_stays() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("app");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("v1.txt"), "v1").unwrap();
+
+        // Nothing to carry: the live target never grew a var/. The copy shipped
+        // in the artifact stays as the initial state.
+        let zip = build_zip(&[("var/seed.txt", Some("factory seed"))]);
+        deploy_zip(zip, &target, &["var".to_string()]).unwrap();
+
+        assert_eq!(read_file(&target.join("var").join("seed.txt")), "factory seed");
+        assert_eq!(dir_entry_names(&target.join("var")), ["seed.txt"]);
+        assert_eq!(dir_entry_names(&target), ["var"]);
+    }
+
+    #[test]
+    fn first_deploy_keeps_shipped_seed() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("app");
+
+        // No previous version: preserve has nothing to carry and must not
+        // interfere with the shipped seed.
+        let zip = build_zip(&[("var/seed.txt", Some("factory seed"))]);
+        deploy_zip(zip, &target, &["var".to_string()]).unwrap();
+
+        assert_eq!(read_file(&target.join("var").join("seed.txt")), "factory seed");
+        assert_eq!(dir_entry_names(&target.join("var")), ["seed.txt"]);
+        assert_eq!(dir_entry_names(dir.path()), ["app"]);
     }
 }

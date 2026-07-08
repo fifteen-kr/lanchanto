@@ -192,6 +192,7 @@ mod tests {
             artifact: vec![config::Artifact {
                 name: "bundle".to_owned(),
                 target: "unused".to_owned(),
+                preserve: Vec::new(),
             }],
             lock: Default::default(),
         }],

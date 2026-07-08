@@ -30,12 +30,18 @@ workflow = "Build"
 [[deploy.artifact]]
 name = "blog.zip"
 target = "/var/www/blog"
+# Optional: paths (relative to `target`) carried over from the previous deploy —
+# runtime state the artifact must never clobber (databases, uploads, ...).
+preserve = ["var"]
 ```
 
 On deploy, each artifact is extracted into a staging directory and swapped into
 place, so the target directory is **replaced**, never merged into: files that
 vanished from the artifact vanish from the target, and a failed download or
-extraction leaves the previous version untouched.
+extraction leaves the previous version untouched. Paths listed in `preserve` are
+the exception — they are carried over from the previous version after the swap,
+replacing any copy of the same path shipped in the artifact (live state wins;
+a shipped copy only serves as the seed on first deploy).
 
 Here is an example of a systemd service file:
 

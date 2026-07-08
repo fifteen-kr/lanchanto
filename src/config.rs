@@ -1,6 +1,6 @@
-use std::path::Path;
+use std::path::{Component, Path};
 
-use anyhow::Context;
+use anyhow::{bail, Context};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -37,6 +37,11 @@ pub struct Deploy {
 pub struct Artifact {
     pub name: String,
     pub target: String,
+
+    /// Paths (relative to `target`) carried over from the previous deploy: runtime
+    /// state the artifact must never clobber (databases, uploads, ...).
+    #[serde(default)]
+    pub preserve: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -70,6 +75,81 @@ impl Config {
             }
         }
 
+        for deploy in &config.deploy {
+            for artifact in &deploy.artifact {
+                for rel in &artifact.preserve {
+                    let is_relative_normal = !rel.is_empty()
+                        && Path::new(rel).components().all(|c| matches!(c, Component::Normal(_)));
+                    if !is_relative_normal {
+                        bail!(
+                            "invalid preserve path {:?} for artifact {} of {}: must be a relative path inside the target (no `..`, no absolute or empty paths)",
+                            rel, artifact.name, deploy.repository
+                        );
+                    }
+                }
+            }
+        }
+
         Ok(config)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Writes `contents` to a config file in a fresh tempdir and loads it.
+    fn load_from_toml(contents: &str) -> anyhow::Result<Config> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, contents).unwrap();
+        Config::load(path)
+    }
+
+    /// A minimal config whose single artifact carries the given `preserve` TOML array.
+    fn config_with_preserve(preserve: &str) -> String {
+        format!(
+            r#"
+[[deploy]]
+repository = "a/b"
+branch = "main"
+
+[[deploy.artifact]]
+name = "x.zip"
+target = "/tmp/x"
+preserve = {preserve}
+"#
+        )
+    }
+
+    fn assert_invalid_preserve(preserve: &str) {
+        let err = load_from_toml(&config_with_preserve(preserve)).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("invalid preserve path"),
+            "expected a preserve validation error, got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn load_accepts_valid_preserve() {
+        let config = load_from_toml(&config_with_preserve(r#"["var", "data/db.sqlite"]"#)).unwrap();
+
+        let artifact = &config.deploy[0].artifact[0];
+        assert_eq!(artifact.preserve, ["var", "data/db.sqlite"]);
+    }
+
+    #[test]
+    fn load_rejects_traversal_preserve() {
+        assert_invalid_preserve(r#"["../escape"]"#);
+    }
+
+    #[test]
+    fn load_rejects_absolute_preserve() {
+        assert_invalid_preserve(r#"["/abs"]"#);
+    }
+
+    #[test]
+    fn load_rejects_empty_preserve_entry() {
+        assert_invalid_preserve(r#"[""]"#);
     }
 }
